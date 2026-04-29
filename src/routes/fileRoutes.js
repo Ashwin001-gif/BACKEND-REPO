@@ -16,7 +16,15 @@ import {
 } from '../controllers/fileController.js';
 import { protect } from '../middlewares/authMiddleware.js';
 
+import fs from 'fs';
+
 const router = express.Router();
+
+// Ensure uploads directory exists for Render ephemeral disk
+const uploadDir = 'uploads/';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
 // Multer configuration for local storage
 const storage = multer.diskStorage({
