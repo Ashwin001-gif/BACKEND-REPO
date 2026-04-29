@@ -33,23 +33,21 @@ export const registerUser = async (req, res) => {
       await logAction(user._id, user.username, 'USER_REGISTER', `Registered with email ${email}`, req.ip);
       
       // Send Welcome Email
-      try {
-        await sendEmail({
-          email: user.email,
-          subject: 'Welcome to ZK Vault - Account Created',
-          message: `
-            <h2>Welcome aboard, ${user.username}!</h2>
-            <p>Your account has been successfully created. You can now securely store and share your sensitive files with zero-knowledge encryption.</p>
-            <p>Get started by exploring your dashboard and setting up your security preferences.</p>
-            <a href="${process.env.CLIENT_URL}/login" class="btn">Go to Dashboard</a>
-            <div class="security-notice">
-              <strong>Security Tip:</strong> Never share your master password or recovery keys with anyone. Our team will never ask for them.
-            </div>
-          `
-        });
-      } catch (err) {
+      sendEmail({
+        email: user.email,
+        subject: 'Welcome to ZK Vault - Account Created',
+        message: `
+          <h2>Welcome aboard, ${user.username}!</h2>
+          <p>Your account has been successfully created. You can now securely store and share your sensitive files with zero-knowledge encryption.</p>
+          <p>Get started by exploring your dashboard and setting up your security preferences.</p>
+          <a href="${process.env.CLIENT_URL}/login" class="btn">Go to Dashboard</a>
+          <div class="security-notice">
+            <strong>Security Tip:</strong> Never share your master password or recovery keys with anyone. Our team will never ask for them.
+          </div>
+        `
+      }).catch(err => {
         console.error('Email could not be sent', err);
-      }
+      });
 
       res.status(201).json({
         _id: user._id,
@@ -78,23 +76,21 @@ export const authUser = async (req, res) => {
       await logAction(user._id, user.username, 'USER_LOGIN', 'User logged in successfully', req.ip);
       
       // Send Login Notification Email
-      try {
-        await sendEmail({
-          email: user.email,
-          subject: 'Security Alert: New Login to ZK Vault',
-          message: `
-            <h2>New Login Detected</h2>
-            <p>Hello ${user.username},</p>
-            <p>This is a security notification to inform you that your account was recently accessed from a new session.</p>
-            <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
-            <p><strong>IP Address:</strong> ${req.ip}</p>
-            <p>If this was you, you can safely ignore this email. If you did not authorize this login, please reset your password immediately.</p>
-            <a href="${process.env.CLIENT_URL}/forgot" class="btn" style="background: #ef4444;">Secure My Account</a>
-          `
-        });
-      } catch (err) {
+      sendEmail({
+        email: user.email,
+        subject: 'Security Alert: New Login to ZK Vault',
+        message: `
+          <h2>New Login Detected</h2>
+          <p>Hello ${user.username},</p>
+          <p>This is a security notification to inform you that your account was recently accessed from a new session.</p>
+          <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
+          <p><strong>IP Address:</strong> ${req.ip}</p>
+          <p>If this was you, you can safely ignore this email. If you did not authorize this login, please reset your password immediately.</p>
+          <a href="${process.env.CLIENT_URL}/forgot" class="btn" style="background: #ef4444;">Secure My Account</a>
+        `
+      }).catch(err => {
         console.error('Email could not be sent', err);
-      }
+      });
 
       res.json({
         _id: user._id,
