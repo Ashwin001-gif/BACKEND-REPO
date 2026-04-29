@@ -14,7 +14,7 @@ import {
   getSharedWithMeFiles,
   downloadSharedWithMeFile
 } from '../controllers/fileController.js';
-import { protect } from '../middleware/authMiddleware.js';
+import { protect } from '../middlewares/authMiddleware.js';
 
 const router = express.Router();
 
