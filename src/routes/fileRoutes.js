@@ -20,21 +20,9 @@ import fs from 'fs';
 
 const router = express.Router();
 
-// Ensure uploads directory exists for Render ephemeral disk
-const uploadDir = 'uploads/';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+// Multer configuration for memory storage
+const storage = multer.memoryStorage();
 
-// Multer configuration for local storage
-const storage = multer.diskStorage({
-  destination(req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename(req, file, cb) {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  },
-});
 
 const upload = multer({ storage });
 

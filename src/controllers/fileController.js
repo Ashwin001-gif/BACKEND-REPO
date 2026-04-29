@@ -3,6 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import File from '../models/File.js';
+import FileData from '../models/FileData.js';
 import ShareLink from '../models/ShareLink.js';
 import { logAction } from '../utils/logger.js';
 
@@ -22,10 +23,15 @@ export const uploadFile = async (req, res) => {
       originalName,
       mimetype,
       size: Number(size),
-      filePath: req.file.path,
+      filePath: 'mongodb-storage', // No longer using local path
       encryptedKey,
       fileIV,
       keyIV,
+    });
+
+    await FileData.create({
+      fileId: file._id,
+      data: req.file.buffer,
     });
 
     await logAction(req.user._id, req.user.username, 'FILE_UPLOAD', `Uploaded ${originalName}`, req.ip);
@@ -64,19 +70,16 @@ export const downloadFile = async (req, res) => {
       return res.status(401).json({ message: 'Not authorized to access this file' });
     }
 
-    const resolvedPath = path.resolve(file.filePath);
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ message: 'File no longer exists on the server (the file might have been deleted from disk storage).' });
+    const fileData = await FileData.findOne({ fileId: file._id });
+    if (!fileData) {
+      return res.status(404).json({ message: 'File data not found in database.' });
     }
 
     await logAction(req.user._id, req.user.username, 'FILE_DOWNLOAD', `Downloaded ${file.originalName}`, req.ip);
-    res.download(resolvedPath, file.originalName, (err) => {
-      if (err) {
-        if (!res.headersSent) {
-          res.status(500).json({ message: 'Error downloading file' });
-        }
-      }
-    });
+    
+    res.setHeader('Content-Disposition', `attachment; filename="${file.originalName}"`);
+    res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+    res.send(fileData.data);
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ message: error.message });
@@ -99,12 +102,9 @@ export const deleteFile = async (req, res) => {
       return res.status(401).json({ message: 'Not authorized to delete this file' });
     }
 
-    // Delete from disk
-    if (fs.existsSync(file.filePath)) {
-      fs.unlinkSync(file.filePath);
-    }
-
+    await FileData.deleteOne({ fileId: file._id });
     await file.deleteOne();
+
     await logAction(req.user._id, req.user.username, 'FILE_DELETE', `Deleted ${file.originalName}`, req.ip);
     res.json({ message: 'File removed' });
   } catch (error) {
@@ -214,18 +214,14 @@ export const downloadSharedFile = async (req, res) => {
       console.error('Failed to send notification:', err);
     }
 
-    const resolvedPath = path.resolve(shareLink.file.filePath);
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ message: 'File no longer exists on the server (the file might have been deleted from disk storage).' });
+    const fileData = await FileData.findOne({ fileId: shareLink.file._id });
+    if (!fileData) {
+      return res.status(404).json({ message: 'File data not found.' });
     }
 
-    res.download(resolvedPath, shareLink.file.originalName, (err) => {
-      if (err) {
-        if (!res.headersSent) {
-          res.status(500).json({ message: 'Error downloading file' });
-        }
-      }
-    });
+    res.setHeader('Content-Disposition', `attachment; filename="${shareLink.file.originalName}"`);
+    res.setHeader('Content-Type', shareLink.file.mimetype || 'application/octet-stream');
+    res.send(fileData.data);
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ message: error.message });
@@ -353,20 +349,16 @@ export const downloadSharedWithMeFile = async (req, res) => {
       return res.status(403).json({ message: 'You do not have permission to download this file' });
     }
 
-    await logAction(req.user._id, req.user.username, 'FILE_DOWNLOAD_SHARED', `Downloaded shared file ${file.originalName}`, req.ip);
-    
-    const resolvedPath = path.resolve(file.filePath);
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ message: 'File no longer exists on the server (the file might have been deleted from disk storage).' });
+    const fileData = await FileData.findOne({ fileId: file._id });
+    if (!fileData) {
+      return res.status(404).json({ message: 'File data not found.' });
     }
 
-    res.download(resolvedPath, file.originalName, (err) => {
-      if (err) {
-        if (!res.headersSent) {
-          res.status(500).json({ message: 'Error downloading file' });
-        }
-      }
-    });
+    await logAction(req.user._id, req.user.username, 'FILE_DOWNLOAD_SHARED', `Downloaded shared file ${file.originalName}`, req.ip);
+
+    res.setHeader('Content-Disposition', `attachment; filename="${file.originalName}"`);
+    res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+    res.send(fileData.data);
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ message: error.message });
