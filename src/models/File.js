@@ -21,15 +21,7 @@ const fileSchema = mongoose.Schema(
     },
     filePath: {
       type: String,
-      required: false,
-    },
-    fileUrl: {
-      type: String, // Cloudinary URL for cloud-stored files
-      required: false,
-    },
-    cloudinaryPublicId: {
-      type: String, // Cloudinary public_id for deletion
-      required: false,
+      required: true,
     },
     encryptedKey: {
       type: String, // The AES-GCM key used to encrypt the file, encrypted with the user's master key

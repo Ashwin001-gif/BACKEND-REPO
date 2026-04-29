@@ -2,68 +2,13 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { Readable } from 'stream';
 import File from '../models/File.js';
 import ShareLink from '../models/ShareLink.js';
-import cloudinary from '../config/cloudinary.js';
 import { logAction } from '../utils/logger.js';
 
-// ─── Helper: upload buffer to Cloudinary ────────────────────────────────────
-const uploadToCloudinary = (buffer, publicId) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        resource_type: 'raw',
-        folder: 'zk-vault',
-        public_id: publicId,
-        overwrite: false,
-      },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result);
-      }
-    );
-    Readable.from(buffer).pipe(stream);
-  });
-};
-
-// ─── Helper: stream file to response (from Cloudinary URL or local disk) ────
-const streamFileToResponse = async (file, res) => {
-  if (file.fileUrl) {
-    // Cloudinary-stored file: fetch and pipe
-    const cloudRes = await fetch(file.fileUrl);
-    if (!cloudRes.ok) {
-      res.status(404).json({ message: 'File not found on cloud storage.' });
-      return;
-    }
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.originalName)}"`);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    // Node 18+ ReadableStream → pipe
-    const reader = cloudRes.body.getReader();
-    const nodeStream = new Readable({
-      async read() {
-        const { done, value } = await reader.read();
-        if (done) this.push(null);
-        else this.push(Buffer.from(value));
-      }
-    });
-    nodeStream.pipe(res);
-  } else {
-    // Legacy: local disk
-    const resolvedPath = path.resolve(file.filePath);
-    if (!fs.existsSync(resolvedPath)) {
-      res.status(404).json({
-        message: 'File no longer exists on the server. This is a legacy file stored on ephemeral disk storage — please re-upload it.',
-      });
-      return;
-    }
-    res.download(resolvedPath, file.originalName, (err) => {
-      if (err && !res.headersSent) res.status(500).json({ message: 'Error downloading file' });
-    });
-  }
-};
-
-// ─── Upload ──────────────────────────────────────────────────────────────────
+// @desc    Upload file
+// @route   POST /api/files/upload
+// @access  Private
 export const uploadFile = async (req, res) => {
   try {
     if (!req.file) {
@@ -72,18 +17,12 @@ export const uploadFile = async (req, res) => {
 
     const { originalName, encryptedKey, fileIV, keyIV, size, mimetype } = req.body;
 
-    // Upload encrypted buffer to Cloudinary
-    const publicId = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    const uploadResult = await uploadToCloudinary(req.file.buffer, publicId);
-
     const file = await File.create({
       user: req.user._id,
       originalName,
       mimetype,
       size: Number(size),
-      filePath: uploadResult.secure_url, // store URL here for backward compat
-      fileUrl: uploadResult.secure_url,
-      cloudinaryPublicId: uploadResult.public_id,
+      filePath: req.file.path,
       encryptedKey,
       fileIV,
       keyIV,
@@ -92,12 +31,13 @@ export const uploadFile = async (req, res) => {
     await logAction(req.user._id, req.user.username, 'FILE_UPLOAD', `Uploaded ${originalName}`, req.ip);
     res.status(201).json(file);
   } catch (error) {
-    console.error('Upload error:', error);
     res.status(500).json({ message: error.message });
   }
 };
 
-// ─── Get All Files ───────────────────────────────────────────────────────────
+// @desc    Get user files
+// @route   GET /api/files
+// @access  Private
 export const getFiles = async (req, res) => {
   try {
     const files = await File.find({ user: req.user._id })
@@ -109,7 +49,9 @@ export const getFiles = async (req, res) => {
   }
 };
 
-// ─── Download (owner) ────────────────────────────────────────────────────────
+// @desc    Download file
+// @route   GET /api/files/download/:id
+// @access  Private
 export const downloadFile = async (req, res) => {
   try {
     const file = await File.findById(req.params.id);
@@ -122,15 +64,29 @@ export const downloadFile = async (req, res) => {
       return res.status(401).json({ message: 'Not authorized to access this file' });
     }
 
+    const resolvedPath = path.resolve(file.filePath);
+    if (!fs.existsSync(resolvedPath)) {
+      return res.status(404).json({ message: 'File no longer exists on the server (the file might have been deleted from disk storage).' });
+    }
+
     await logAction(req.user._id, req.user.username, 'FILE_DOWNLOAD', `Downloaded ${file.originalName}`, req.ip);
-    await streamFileToResponse(file, res);
+    res.download(resolvedPath, file.originalName, (err) => {
+      if (err) {
+        if (!res.headersSent) {
+          res.status(500).json({ message: 'Error downloading file' });
+        }
+      }
+    });
   } catch (error) {
-    console.error('Download error:', error);
-    if (!res.headersSent) res.status(500).json({ message: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ message: error.message });
+    }
   }
 };
 
-// ─── Delete ──────────────────────────────────────────────────────────────────
+// @desc    Delete file
+// @route   DELETE /api/files/:id
+// @access  Private
 export const deleteFile = async (req, res) => {
   try {
     const file = await File.findById(req.params.id);
@@ -143,14 +99,8 @@ export const deleteFile = async (req, res) => {
       return res.status(401).json({ message: 'Not authorized to delete this file' });
     }
 
-    // Delete from Cloudinary or local disk
-    if (file.cloudinaryPublicId) {
-      try {
-        await cloudinary.uploader.destroy(file.cloudinaryPublicId, { resource_type: 'raw' });
-      } catch (cloudErr) {
-        console.error('Cloudinary delete error:', cloudErr.message);
-      }
-    } else if (file.filePath && fs.existsSync(file.filePath)) {
+    // Delete from disk
+    if (fs.existsSync(file.filePath)) {
       fs.unlinkSync(file.filePath);
     }
 
@@ -162,7 +112,9 @@ export const deleteFile = async (req, res) => {
   }
 };
 
-// ─── Create Share Link ───────────────────────────────────────────────────────
+// @desc    Create share link
+// @route   POST /api/files/share
+// @access  Private
 export const createShareLink = async (req, res) => {
   try {
     const { fileId, password } = req.body;
@@ -194,7 +146,9 @@ export const createShareLink = async (req, res) => {
   }
 };
 
-// ─── Get Shared File Meta (public) ──────────────────────────────────────────
+// @desc    Get shared file metadata
+// @route   GET /api/files/share/:shareId
+// @access  Public
 export const getSharedFileMeta = async (req, res) => {
   try {
     const { shareId } = req.params;
@@ -217,7 +171,9 @@ export const getSharedFileMeta = async (req, res) => {
   }
 };
 
-// ─── Download Shared File (public) ──────────────────────────────────────────
+// @desc    Download shared file
+// @route   POST /api/files/share/:shareId/download
+// @access  Public
 export const downloadSharedFile = async (req, res) => {
   try {
     const { shareId } = req.params;
@@ -229,6 +185,7 @@ export const downloadSharedFile = async (req, res) => {
       return res.status(404).json({ message: 'Share link not found or expired' });
     }
 
+    // Check password if required
     if (shareLink.passwordHash) {
       const isMatch = await bcrypt.compare(password || '', shareLink.passwordHash);
       if (!isMatch) {
@@ -241,7 +198,7 @@ export const downloadSharedFile = async (req, res) => {
 
     await logAction(null, 'Anonymous', 'SHARE_ACCESSED', `Accessed shared file ${shareLink.file.originalName}`, req.ip);
 
-    // Notify file owner
+    // Add notification for the owner
     try {
       const Notification = (await import('../models/Notification.js')).default;
       const notification = await Notification.create({
@@ -250,19 +207,35 @@ export const downloadSharedFile = async (req, res) => {
         message: `Your shared file "${shareLink.file.originalName}" was just downloaded!`,
         type: 'FILE_SHARED',
       });
+      
+      // Emit socket event if user is online
       req.io.to(shareLink.file.user.toString()).emit('new_notification', notification);
     } catch (err) {
-      console.error('Failed to send notification', err);
+      console.error('Failed to send notification:', err);
     }
 
-    await streamFileToResponse(shareLink.file, res);
+    const resolvedPath = path.resolve(shareLink.file.filePath);
+    if (!fs.existsSync(resolvedPath)) {
+      return res.status(404).json({ message: 'File no longer exists on the server (the file might have been deleted from disk storage).' });
+    }
+
+    res.download(resolvedPath, shareLink.file.originalName, (err) => {
+      if (err) {
+        if (!res.headersSent) {
+          res.status(500).json({ message: 'Error downloading file' });
+        }
+      }
+    });
   } catch (error) {
-    console.error('Download shared error:', error);
-    if (!res.headersSent) res.status(500).json({ message: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ message: error.message });
+    }
   }
 };
 
-// ─── Invite User ─────────────────────────────────────────────────────────────
+// @desc    Invite user to file
+// @route   POST /api/files/:id/invite
+// @access  Private
 export const inviteUserToFile = async (req, res) => {
   try {
     const { id } = req.params;
@@ -274,8 +247,9 @@ export const inviteUserToFile = async (req, res) => {
       return res.status(404).json({ message: 'File not found or unauthorized' });
     }
 
+    // Add to access list
     const existingIndex = file.accessList.findIndex(a => a.user.toString() === userId);
-
+    
     if (existingIndex >= 0) {
       file.accessList[existingIndex].permissions = { ...file.accessList[existingIndex].permissions, ...permissions };
       file.accessList[existingIndex].encryptedKeyForUser = encryptedKeyForUser;
@@ -283,13 +257,14 @@ export const inviteUserToFile = async (req, res) => {
       file.accessList.push({
         user: userId,
         encryptedKeyForUser,
-        permissions: permissions || { view: true, download: true },
+        permissions: permissions || { view: true, download: true }
       });
     }
 
     await file.save();
     await logAction(req.user._id, req.user.username, 'FILE_INVITE', `Invited user to ${file.originalName}`, req.ip);
 
+    // Notify the invited user
     try {
       const Notification = (await import('../models/Notification.js')).default;
       const notification = await Notification.create({
@@ -298,9 +273,10 @@ export const inviteUserToFile = async (req, res) => {
         message: `${req.user.username} shared "${file.originalName}" with you.`,
         type: 'FILE_SHARED',
       });
+      
       req.io.to(userId.toString()).emit('new_notification', notification);
     } catch (err) {
-      console.error('Failed to send notification', err);
+      console.error('Failed to send notification:', err);
     }
 
     res.json({ message: 'User invited successfully' });
@@ -309,7 +285,9 @@ export const inviteUserToFile = async (req, res) => {
   }
 };
 
-// ─── Revoke User Access ──────────────────────────────────────────────────────
+// @desc    Revoke user access
+// @route   POST /api/files/:id/revoke
+// @access  Private
 export const revokeUserAccess = async (req, res) => {
   try {
     const { id } = req.params;
@@ -324,20 +302,23 @@ export const revokeUserAccess = async (req, res) => {
     file.accessList = file.accessList.filter(a => a.user.toString() !== userId);
     await file.save();
 
-    await logAction(req.user._id, req.user.username, 'FILE_REVOKE', `Revoked access to ${file.originalName}`, req.ip);
+    await logAction(req.user._id, req.user.username, 'FILE_REVOKE', `Revoked access for user from ${file.originalName}`, req.ip);
     res.json({ message: 'Access revoked successfully' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// ─── Get Files Shared With Me ────────────────────────────────────────────────
+// @desc    Get files shared with me
+// @route   GET /api/files/shared-with-me
+// @access  Private
 export const getSharedWithMeFiles = async (req, res) => {
   try {
-    const files = await File.find({ 'accessList.user': req.user._id })
-      .populate('user', 'username email')
-      .sort({ createdAt: -1 });
+    const files = await File.find({
+      'accessList.user': req.user._id
+    }).populate('user', 'username email').sort({ createdAt: -1 });
 
+    // Filter the accessList in the result to only show the current user's access info
     const sanitizedFiles = files.map(file => {
       const fObj = file.toObject();
       fObj.accessList = fObj.accessList.filter(a => a.user.toString() === req.user._id.toString());
@@ -350,7 +331,9 @@ export const getSharedWithMeFiles = async (req, res) => {
   }
 };
 
-// ─── Download Shared-With-Me File ───────────────────────────────────────────
+// @desc    Download shared-with-me file
+// @route   GET /api/files/shared-with-me/download/:id
+// @access  Private
 export const downloadSharedWithMeFile = async (req, res) => {
   try {
     const file = await File.findById(req.params.id);
@@ -359,8 +342,9 @@ export const downloadSharedWithMeFile = async (req, res) => {
       return res.status(404).json({ message: 'File not found' });
     }
 
+    // Check if user has access
     const access = file.accessList.find(a => a.user.toString() === req.user._id.toString());
-
+    
     if (!access) {
       return res.status(401).json({ message: 'Not authorized to access this file' });
     }
@@ -370,9 +354,22 @@ export const downloadSharedWithMeFile = async (req, res) => {
     }
 
     await logAction(req.user._id, req.user.username, 'FILE_DOWNLOAD_SHARED', `Downloaded shared file ${file.originalName}`, req.ip);
-    await streamFileToResponse(file, res);
+    
+    const resolvedPath = path.resolve(file.filePath);
+    if (!fs.existsSync(resolvedPath)) {
+      return res.status(404).json({ message: 'File no longer exists on the server (the file might have been deleted from disk storage).' });
+    }
+
+    res.download(resolvedPath, file.originalName, (err) => {
+      if (err) {
+        if (!res.headersSent) {
+          res.status(500).json({ message: 'Error downloading file' });
+        }
+      }
+    });
   } catch (error) {
-    console.error('Download shared-with-me error:', error);
-    if (!res.headersSent) res.status(500).json({ message: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ message: error.message });
+    }
   }
 };
